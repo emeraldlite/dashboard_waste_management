@@ -1,43 +1,30 @@
-# Dashboard Waste Management Simulator
+# Waste Dashboard Simulator
 
-This repository contains a lightweight telemetry simulator for waste bins.
+`simulate.py` generates synthetic bin telemetry and publishes it at a fixed interval.
 
-## Configuration
+## Environment variables
 
-Copy `.env.example` to `.env` and adjust as needed:
+- `MQTT_BROKER` (default: `localhost`)
+- `MQTT_PORT` (default: `1883`)
+- `MQTT_TOPIC` (default: `waste/bins/status`)
+- `MQTT_USERNAME` / `MQTT_PASSWORD` (optional)
+- `PUBLISH_INTERVAL` in seconds (default: `5`)
+- `DEVICE_ID` (default: `bin-001`)
+- `SIM_SEED` (default: `42`)
+- `DRY_RUN` (default: `false`)
 
-- `SEED`: Set an integer for deterministic behavior.
-- `DEMO_SCENARIO`: Scenario profile for demo behavior (default: `normal`).
-- `PUBLISH_INTERVAL_SEC`: Seconds between publish cycles.
-- `SLEEP_ENABLED`: Set to `0`/`false` to run ticks without real-time sleeping (handy for tests).
-
-## Demo scenarios
-
-`DEMO_SCENARIO` accepts the following values:
-
-- `normal`:
-  - Baseline behavior with modest random level drift and balanced-ish waste type distribution.
-
-- `stale_one_bin`:
-  - Bin `B-03` pauses publishing for 5 minutes, then resumes.
-  - Other bins continue publishing as normal.
-
-- `overflow_wave`:
-  - Bin levels rise in a controlled wave to overflow range (`>= 90`).
-  - Group `A-*` bins rise first, followed by `B-*` bins.
-
-- `organic_shift`:
-  - `Foodcourt A` strongly favors `organic` waste type.
-  - `Foodcourt B` is biased toward non-organic categories.
-
-## Run
+## Run with MQTT
 
 ```bash
 python simulate.py
 ```
 
-For quick checks without waiting, you can override interval and tick count:
+## DRY_RUN mode (no MQTT connection)
+
+Set `DRY_RUN=true` to avoid connecting to MQTT and print payloads to stdout at each publish interval.
 
 ```bash
-SEED=42 DEMO_SCENARIO=overflow_wave PUBLISH_INTERVAL_SEC=1 MAX_TICKS=20 SLEEP_ENABLED=0 python simulate.py
+DRY_RUN=true PUBLISH_INTERVAL=1 python simulate.py
 ```
+
+This is useful for validating payload shape and evolution/status behavior locally without broker credentials or tokens.
