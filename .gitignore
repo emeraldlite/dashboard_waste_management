@@ -1,4 +1,11 @@
+# Python virtual envs
+.venv/
+venv/
+
+# Local secrets and device tokens
 .env
 bins.json
+
+# Python cache artifacts
 __pycache__/
 *.pyc

@@ -1,0 +1,72 @@
+[
+  {
+    "foodcourt": "Foodcourt A",
+    "bin_id": "A-01",
+    "waste_type": "mixed",
+    "waste_type_code": 0,
+    "access_token": "REPLACE_WITH_TOKEN_A_01"
+  },
+  {
+    "foodcourt": "Foodcourt A",
+    "bin_id": "A-02",
+    "waste_type": "organic",
+    "waste_type_code": 1,
+    "access_token": "REPLACE_WITH_TOKEN_A_02"
+  },
+  {
+    "foodcourt": "Foodcourt A",
+    "bin_id": "A-03",
+    "waste_type": "recyclable",
+    "waste_type_code": 2,
+    "access_token": "REPLACE_WITH_TOKEN_A_03"
+  },
+  {
+    "foodcourt": "Foodcourt A",
+    "bin_id": "A-04",
+    "waste_type": "paper",
+    "waste_type_code": 3,
+    "access_token": "REPLACE_WITH_TOKEN_A_04"
+  },
+  {
+    "foodcourt": "Foodcourt A",
+    "bin_id": "A-05",
+    "waste_type": "plastic",
+    "waste_type_code": 4,
+    "access_token": "REPLACE_WITH_TOKEN_A_05"
+  },
+  {
+    "foodcourt": "Foodcourt B",
+    "bin_id": "B-01",
+    "waste_type": "mixed",
+    "waste_type_code": 0,
+    "access_token": "REPLACE_WITH_TOKEN_B_01"
+  },
+  {
+    "foodcourt": "Foodcourt B",
+    "bin_id": "B-02",
+    "waste_type": "organic",
+    "waste_type_code": 1,
+    "access_token": "REPLACE_WITH_TOKEN_B_02"
+  },
+  {
+    "foodcourt": "Foodcourt B",
+    "bin_id": "B-03",
+    "waste_type": "recyclable",
+    "waste_type_code": 2,
+    "access_token": "REPLACE_WITH_TOKEN_B_03"
+  },
+  {
+    "foodcourt": "Foodcourt B",
+    "bin_id": "B-04",
+    "waste_type": "paper",
+    "waste_type_code": 3,
+    "access_token": "REPLACE_WITH_TOKEN_B_04"
+  },
+  {
+    "foodcourt": "Foodcourt B",
+    "bin_id": "B-05",
+    "waste_type": "plastic",
+    "waste_type_code": 4,
+    "access_token": "REPLACE_WITH_TOKEN_B_05"
+  }
+]
