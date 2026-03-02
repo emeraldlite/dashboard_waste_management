@@ -1,48 +1,43 @@
 # Dashboard Waste Management Simulator
 
-`simulate.py` publishes mock telemetry for waste bins to ThingsBoard Cloud via MQTT.
+This repository contains a lightweight telemetry simulator for waste bins.
 
-## Requirements
+## Configuration
 
-- Python 3.9+
-- `paho-mqtt`
+Copy `.env.example` to `.env` and adjust as needed:
+
+- `SEED`: Set an integer for deterministic behavior.
+- `DEMO_SCENARIO`: Scenario profile for demo behavior (default: `normal`).
+- `PUBLISH_INTERVAL_SEC`: Seconds between publish cycles.
+- `SLEEP_ENABLED`: Set to `0`/`false` to run ticks without real-time sleeping (handy for tests).
+
+## Demo scenarios
+
+`DEMO_SCENARIO` accepts the following values:
+
+- `normal`:
+  - Baseline behavior with modest random level drift and balanced-ish waste type distribution.
+
+- `stale_one_bin`:
+  - Bin `B-03` pauses publishing for 5 minutes, then resumes.
+  - Other bins continue publishing as normal.
+
+- `overflow_wave`:
+  - Bin levels rise in a controlled wave to overflow range (`>= 90`).
+  - Group `A-*` bins rise first, followed by `B-*` bins.
+
+- `organic_shift`:
+  - `Foodcourt A` strongly favors `organic` waste type.
+  - `Foodcourt B` is biased toward non-organic categories.
+
+## Run
 
 ```bash
-pip install paho-mqtt
+python simulate.py
 ```
 
-## Usage
-
-Default behavior is **one MQTT client per bin** (required for direct device-token auth in ThingsBoard Cloud).
+For quick checks without waiting, you can override interval and tick count:
 
 ```bash
-python simulate.py \
-  --bin bin-001:DEVICE_TOKEN_1 \
-  --bin bin-002:DEVICE_TOKEN_2
+SEED=42 DEMO_SCENARIO=overflow_wave PUBLISH_INTERVAL_SEC=1 MAX_TICKS=20 SLEEP_ENABLED=0 python simulate.py
 ```
-
-### CLI flags
-
-- `--bin BIN_ID:TOKEN` (repeatable, required): bin id + ThingsBoard device token.
-- `--interval FLOAT`: seconds between telemetry publishes per bin (default `5.0`).
-- `--tls`: enable TLS.
-- `--host HOST`: MQTT host (default `mqtt.thingsboard.cloud`).
-- `--port INT`: MQTT port (default `1883`).
-- `--seed INT`: deterministic seed for reproducible telemetry values.
-- `--mode {per-bin,single}`: connection mode. `single` exits with an error because gateway-style multi-device publish requires ThingsBoard gateway provisioning and is not compatible with plain ThingsBoard Cloud device-token setup.
-
-### TLS example
-
-```bash
-python simulate.py \
-  --bin bin-001:DEVICE_TOKEN_1 \
-  --tls \
-  --host mqtt.thingsboard.cloud \
-  --port 8883
-```
-
-## Reliability behavior
-
-- Each bin runs independently in its own MQTT client thread.
-- `on_disconnect` triggers reconnect attempts with exponential backoff (1s to 30s).
-- Publish failures for one bin do not stop telemetry publishing for other bins.
