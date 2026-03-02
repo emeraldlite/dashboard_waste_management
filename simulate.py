@@ -1,159 +1,289 @@
 #!/usr/bin/env python3
-"""Waste-bin telemetry simulator with optional demo scenarios.
+"""Waste-bin telemetry simulator.
 
-Environment variables:
-- SEED: optional integer for deterministic output.
-- DEMO_SCENARIO: one of normal, stale_one_bin, overflow_wave, organic_shift.
-- PUBLISH_INTERVAL_SEC: publish cadence per bin (default: 5).
-- MAX_TICKS: optional integer to stop after N ticks (useful for demos/tests).
+Loads bin definitions from ``bins.json`` and publishes evolving fill-level payloads.
+Supports a mock mode for local testing without MQTT credentials.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-WASTE_TYPES = ["organic", "plastic", "paper", "mixed"]
-SCENARIOS = {"normal", "stale_one_bin", "overflow_wave", "organic_shift"}
+LOGGER = logging.getLogger("simulator")
+
+
+@dataclass(frozen=True)
+class BinConfig:
+    """Static configuration for a waste bin."""
+
+    bin_id: str
+    latitude: float
+    longitude: float
+    capacity_liters: float
+    fill_start_pct: float = 0.0
+    growth_per_tick_pct: float = 1.0
 
 
 @dataclass
 class BinState:
-    bin_id: str
-    foodcourt: str
-    level: float
+    """Mutable simulation state for a waste bin."""
+
+    config: BinConfig
+    fill_pct: float
+    battery_pct: float = 100.0
 
 
-def _parse_int(name: str, default: int | None) -> int | None:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got: {raw!r}") from exc
+@dataclass(frozen=True)
+class AppConfig:
+    broker_host: str
+    broker_port: int
+    mqtt_username: Optional[str]
+    mqtt_password: Optional[str]
+    topic_prefix: str
+    interval_seconds: float
+    iterations: int
+    bins_path: Path
+    mock_mode: bool
 
 
-def _setup_bins(rng: random.Random) -> List[BinState]:
-    bins: List[BinState] = []
-    for prefix, foodcourt in (("A", "Foodcourt A"), ("B", "Foodcourt B")):
-        for idx in range(1, 6):
-            bins.append(
-                BinState(
-                    bin_id=f"{prefix}-{idx:02d}",
-                    foodcourt=foodcourt,
-                    level=rng.uniform(20.0, 55.0),
-                )
+class Publisher:
+    """Publisher abstraction so we can swap mock/real clients."""
+
+    def publish(self, topic: str, payload: str) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class MockPublisher(Publisher):
+    def publish(self, topic: str, payload: str) -> None:
+        LOGGER.info("[mock] topic=%s payload=%s", topic, payload)
+
+
+class MqttPublisher(Publisher):
+    def __init__(self, host: str, port: int, username: Optional[str], password: Optional[str]) -> None:
+        try:
+            import paho.mqtt.client as mqtt  # type: ignore
+        except ImportError as exc:  # pragma: no cover - runtime environment specific
+            raise RuntimeError(
+                "paho-mqtt is required for non-mock mode. Install with: pip install paho-mqtt"
+            ) from exc
+
+        self._mqtt = mqtt
+        self._client = mqtt.Client()
+        if username:
+            self._client.username_pw_set(username=username, password=password)
+
+        LOGGER.info("Connecting to MQTT broker %s:%s", host, port)
+        rc = self._client.connect(host, port, keepalive=60)
+        if rc != 0:
+            raise RuntimeError(f"Failed to connect to MQTT broker (result code={rc})")
+        self._client.loop_start()
+
+    def publish(self, topic: str, payload: str) -> None:
+        result = self._client.publish(topic, payload=payload)
+        if result.rc != 0:
+            LOGGER.warning(
+                "Publish failed with rc=%s for topic=%s; attempting reconnect",
+                result.rc,
+                topic,
             )
+            self._client.reconnect()
+            retry = self._client.publish(topic, payload=payload)
+            if retry.rc != 0:
+                raise RuntimeError(f"Publish failed after reconnect with rc={retry.rc}")
+
+
+def _load_dotenv(env_path: Path = Path(".env")) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not env_path.exists():
+        return values
+
+    for idx, raw_line in enumerate(env_path.read_text().splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"Invalid .env line {idx}: expected KEY=VALUE format")
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def _require_number(value: Any, *, name: str, bin_id: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"Bin '{bin_id}' field '{name}' must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _validate_bins_content(raw: Any) -> List[BinConfig]:
+    bins_raw: Iterable[Mapping[str, Any]]
+    if isinstance(raw, list):
+        bins_raw = raw
+    elif isinstance(raw, dict) and isinstance(raw.get("bins"), list):
+        bins_raw = raw["bins"]
+    else:
+        raise ValueError("bins.json must be a JSON array or an object with a 'bins' array")
+
+    bins: List[BinConfig] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(bins_raw, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Entry #{idx} in bins.json must be an object")
+
+        try:
+            bin_id = str(item["id"])
+            lat = _require_number(item["latitude"], name="latitude", bin_id=bin_id)
+            lon = _require_number(item["longitude"], name="longitude", bin_id=bin_id)
+            cap = _require_number(item["capacity_liters"], name="capacity_liters", bin_id=bin_id)
+            fill_start = _require_number(item.get("fill_start_pct", 0.0), name="fill_start_pct", bin_id=bin_id)
+            growth = _require_number(item.get("growth_per_tick_pct", 1.0), name="growth_per_tick_pct", bin_id=bin_id)
+        except KeyError as exc:
+            raise ValueError(f"Entry #{idx} missing required field: {exc.args[0]}") from exc
+
+        if not bin_id:
+            raise ValueError(f"Entry #{idx} has empty 'id'")
+        if bin_id in seen_ids:
+            raise ValueError(f"Duplicate bin id found: '{bin_id}'")
+        seen_ids.add(bin_id)
+
+        if not 0 <= fill_start <= 100:
+            raise ValueError(f"Bin '{bin_id}' fill_start_pct must be between 0 and 100")
+        if growth < 0:
+            raise ValueError(f"Bin '{bin_id}' growth_per_tick_pct must be >= 0")
+
+        bins.append(
+            BinConfig(
+                bin_id=bin_id,
+                latitude=lat,
+                longitude=lon,
+                capacity_liters=cap,
+                fill_start_pct=fill_start,
+                growth_per_tick_pct=growth,
+            )
+        )
+
+    if not bins:
+        raise ValueError("bins.json does not contain any bins")
     return bins
 
 
-def _scenario_waste_weights(scenario: str, bin_state: BinState) -> Tuple[float, float, float, float]:
-    if scenario != "organic_shift":
-        return (0.35, 0.25, 0.2, 0.2)
+def load_config(args: argparse.Namespace) -> tuple[AppConfig, List[BinState]]:
+    env = _load_dotenv()
 
-    if bin_state.foodcourt == "Foodcourt A":
-        return (0.72, 0.12, 0.1, 0.06)
-    return (0.08, 0.34, 0.3, 0.28)
+    bins_path = Path(args.bins_file)
+    if not bins_path.exists():
+        raise FileNotFoundError(
+            f"Could not find bins file at '{bins_path}'. Create bins.json with an array of bin objects."
+        )
 
+    try:
+        raw = json.loads(bins_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {bins_path}: {exc}") from exc
 
-def _apply_base_level_drift(rng: random.Random, level: float) -> float:
-    drift = rng.uniform(-1.8, 4.8)
-    return max(0.0, min(100.0, level + drift))
+    bin_configs = _validate_bins_content(raw)
+    states = [BinState(config=b, fill_pct=b.fill_start_pct) for b in bin_configs]
 
-
-def _apply_overflow_wave(level: float, tick: int, bin_state: BinState) -> float:
-    # A bins rise first, then B bins. Ramp is deterministic and based on tick count.
-    start_tick = 0 if bin_state.bin_id.startswith("A-") else 12
-    if tick < start_tick:
-        return level
-    progress = tick - start_tick
-    if level < 90.0:
-        # Gradual rise toward overflow region.
-        level = min(95.0, level + 2.6 + (0.25 * min(progress, 10)))
-    return level
-
-
-def _should_publish(scenario: str, bin_state: BinState, elapsed_seconds: int) -> bool:
-    if scenario != "stale_one_bin":
-        return True
-
-    if bin_state.bin_id != "B-03":
-        return True
-
-    stale_start = 60
-    stale_end = stale_start + 300
-    return not (stale_start <= elapsed_seconds < stale_end)
+    cfg = AppConfig(
+        broker_host=args.broker_host or env.get("BROKER_HOST", "localhost"),
+        broker_port=int(args.broker_port or env.get("BROKER_PORT", 1883)),
+        mqtt_username=args.username or env.get("MQTT_USERNAME"),
+        mqtt_password=args.password or env.get("MQTT_PASSWORD"),
+        topic_prefix=args.topic_prefix or env.get("TOPIC_PREFIX", "waste/bins"),
+        interval_seconds=float(args.interval),
+        iterations=int(args.iterations),
+        bins_path=bins_path,
+        mock_mode=bool(args.mock),
+    )
+    return cfg, states
 
 
-def _build_payload(
-    rng: random.Random,
-    scenario: str,
-    tick: int,
-    elapsed_seconds: int,
-    now: datetime,
-    bin_state: BinState,
-) -> Dict[str, object]:
-    bin_state.level = _apply_base_level_drift(rng, bin_state.level)
-    if scenario == "overflow_wave":
-        bin_state.level = _apply_overflow_wave(bin_state.level, tick, bin_state)
+def connect_clients(config: AppConfig) -> Publisher:
+    if config.mock_mode:
+        LOGGER.info("Using mock publisher")
+        return MockPublisher()
+    return MqttPublisher(
+        host=config.broker_host,
+        port=config.broker_port,
+        username=config.mqtt_username,
+        password=config.mqtt_password,
+    )
 
-    weights = _scenario_waste_weights(scenario, bin_state)
-    waste_type = rng.choices(WASTE_TYPES, weights=weights, k=1)[0]
 
+def evolve_state(state: BinState) -> BinState:
+    growth = random.uniform(0.4, 1.2) * state.config.growth_per_tick_pct
+    next_fill = min(100.0, state.fill_pct + growth)
+    next_battery = max(0.0, state.battery_pct - random.uniform(0.01, 0.05))
+
+    if next_fill >= 100.0:
+        next_fill = random.uniform(4.0, 12.0)
+
+    return BinState(config=state.config, fill_pct=round(next_fill, 2), battery_pct=round(next_battery, 2))
+
+
+def make_payload(state: BinState) -> Dict[str, Any]:
     return {
-        "timestamp": now.isoformat(),
-        "bin_id": bin_state.bin_id,
-        "foodcourt": bin_state.foodcourt,
-        "level": round(bin_state.level, 2),
-        "waste_type": waste_type,
+        "bin_id": state.config.bin_id,
+        "timestamp": int(time.time()),
+        "location": {"lat": state.config.latitude, "lon": state.config.longitude},
+        "capacity_liters": state.config.capacity_liters,
+        "fill_pct": state.fill_pct,
+        "battery_pct": state.battery_pct,
     }
 
 
+def publish_loop(config: AppConfig, states: List[BinState], publisher: Publisher) -> None:
+    for tick in range(config.iterations):
+        updated: List[BinState] = []
+        for state in states:
+            next_state = evolve_state(state)
+            payload = make_payload(next_state)
+            topic = f"{config.topic_prefix}/{next_state.config.bin_id}"
+            publisher.publish(topic, json.dumps(payload))
+            updated.append(next_state)
+
+        avg_fill = sum(s.fill_pct for s in updated) / len(updated)
+        LOGGER.info(
+            "Published tick=%s bins=%s avg_fill=%.2f%%",
+            tick + 1,
+            len(updated),
+            avg_fill,
+        )
+
+        states[:] = updated
+        if tick < config.iterations - 1:
+            time.sleep(config.interval_seconds)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Waste bin telemetry simulator")
+    parser.add_argument("--bins-file", default="bins.json", help="Path to bins configuration JSON")
+    parser.add_argument("--broker-host", default=None, help="MQTT broker host")
+    parser.add_argument("--broker-port", type=int, default=None, help="MQTT broker port")
+    parser.add_argument("--username", default=None, help="MQTT username")
+    parser.add_argument("--password", default=None, help="MQTT password")
+    parser.add_argument("--topic-prefix", default=None, help="MQTT topic prefix")
+    parser.add_argument("--interval", type=float, default=2.0, help="Seconds between publish ticks")
+    parser.add_argument("--iterations", type=int, default=10, help="Number of publish ticks")
+    parser.add_argument("--mock", action="store_true", help="Use mock publisher (no MQTT connection)")
+    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ...)")
+    return parser.parse_args()
+
+
 def main() -> None:
-    seed = _parse_int("SEED", None)
-    rng = random.Random(seed)
+    args = parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s %(message)s")
 
-    scenario = os.getenv("DEMO_SCENARIO", "normal").strip().lower() or "normal"
-    if scenario not in SCENARIOS:
-        valid = ", ".join(sorted(SCENARIOS))
-        raise ValueError(f"Unsupported DEMO_SCENARIO={scenario!r}. Expected one of: {valid}")
-
-    interval_sec = _parse_int("PUBLISH_INTERVAL_SEC", 5)
-    if interval_sec is None or interval_sec <= 0:
-        raise ValueError("PUBLISH_INTERVAL_SEC must be > 0")
-
-    max_ticks = _parse_int("MAX_TICKS", None)
-    if max_ticks is not None and max_ticks <= 0:
-        raise ValueError("MAX_TICKS must be > 0 when set")
-
-    sleep_enabled = os.getenv("SLEEP_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
-
-    bins = _setup_bins(rng)
-    start = datetime(2024, 1, 1, tzinfo=timezone.utc) if seed is not None else datetime.now(tz=timezone.utc)
-
-    tick = 0
-    while True:
-        now = start + timedelta(seconds=tick * interval_sec)
-        elapsed_seconds = tick * interval_sec
-
-        for bin_state in bins:
-            if not _should_publish(scenario, bin_state, elapsed_seconds):
-                continue
-            payload = _build_payload(rng, scenario, tick, elapsed_seconds, now, bin_state)
-            print(json.dumps(payload), flush=True)
-
-        tick += 1
-        if max_ticks is not None and tick >= max_ticks:
-            break
-
-        if sleep_enabled:
-            time.sleep(interval_sec)
+    config, states = load_config(args)
+    publisher = connect_clients(config)
+    publish_loop(config, states, publisher)
 
 
 if __name__ == "__main__":
