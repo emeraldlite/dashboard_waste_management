@@ -1,93 +1,45 @@
 #!/usr/bin/env python3
-import json
+"""Minimal simulator entrypoint used by CI."""
+
+from __future__ import annotations
+
+import argparse
 import os
-import random
 import time
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a simple simulator loop.")
+    parser.add_argument(
+        "--run-seconds",
+        type=float,
+        default=None,
+        help="Exit after this many seconds. If omitted, run forever.",
+    )
+    return parser.parse_args()
 
 
-@dataclass
-class BinState:
-    device_id: str
-    fill_level_pct: int
-    battery_pct: int
-    temperature_c: float
-    status: str
-
-    def evolve(self) -> None:
-        self.fill_level_pct = min(100, max(0, self.fill_level_pct + random.randint(-2, 5)))
-        self.battery_pct = min(100, max(0, self.battery_pct - random.choice([0, 0, 1])))
-        self.temperature_c = round(self.temperature_c + random.uniform(-0.4, 0.4), 1)
-
-        if self.fill_level_pct >= 90:
-            self.status = "full"
-        elif self.fill_level_pct >= 75:
-            self.status = "warning"
-        else:
-            self.status = "normal"
-
-
-def build_payload(state: BinState) -> dict:
-    payload = asdict(state)
-    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
-    return payload
-
-
-def make_mqtt_client() -> tuple[object, str]:
-    import paho.mqtt.client as mqtt
-
-    broker = os.getenv("MQTT_BROKER", "localhost")
-    port = int(os.getenv("MQTT_PORT", "1883"))
-    username = os.getenv("MQTT_USERNAME")
-    password = os.getenv("MQTT_PASSWORD")
-    topic = os.getenv("MQTT_TOPIC", "waste/bins/status")
-
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if username:
-        client.username_pw_set(username=username, password=password)
-
-    client.connect(broker, port)
-    client.loop_start()
-    return client, topic
+def is_dry_run() -> bool:
+    return os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def main() -> None:
-    random.seed(int(os.getenv("SIM_SEED", "42")))
+    args = parse_args()
+    dry_run = is_dry_run()
 
-    interval_s = float(os.getenv("PUBLISH_INTERVAL", "5"))
-    dry_run = env_bool("DRY_RUN", False)
-
-    state = BinState(
-        device_id=os.getenv("DEVICE_ID", "bin-001"),
-        fill_level_pct=int(os.getenv("INITIAL_FILL_PCT", "25")),
-        battery_pct=int(os.getenv("INITIAL_BATTERY_PCT", "100")),
-        temperature_c=float(os.getenv("INITIAL_TEMP_C", "20.0")),
-        status="normal",
-    )
-
-    mqtt_client = None
-    topic = ""
-    if not dry_run:
-        mqtt_client, topic = make_mqtt_client()
+    start = time.monotonic()
+    iterations = 0
 
     while True:
-        state.evolve()
-        payload = build_payload(state)
+        iterations += 1
+        mode = "DRY_RUN" if dry_run else "LIVE"
+        print(f"[{mode}] simulation tick {iterations}", flush=True)
 
-        if dry_run:
-            print(json.dumps(payload), flush=True)
-        else:
-            mqtt_client.publish(topic, json.dumps(payload), qos=1)
+        if args.run_seconds is not None and (time.monotonic() - start) >= args.run_seconds:
+            print("Reached requested runtime; exiting.", flush=True)
+            break
 
-        time.sleep(interval_s)
+        time.sleep(1)
 
 
 if __name__ == "__main__":
